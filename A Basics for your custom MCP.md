@@ -1,4 +1,4 @@
-# A Basics for your custom MCP.md
+# A Basics for your custom MCP
 
 Model Context Protocal (MCP) is one of the hottest topic in AI.  
 MCP의 목적은 LLM에서 사용할 데이터, 실행 함수, 프롬프트를 규격화하여 여러 AI 서비스를 통합하여 사용할 수 있는 환경을 조성하는 것이다.  
@@ -210,6 +210,20 @@ app = Starlette(
 if __name__ == "__main__":
     uvicorn.run(app, host="localhost", port=8001)
 ```
+
+# Implementation examples for MCP Client
+## import libaries
+```
+import asyncio
+import sys
+import traceback
+from urllib.parse import urlparse
+
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+```
+
+## TBU
 MCP에서 제공하는 `SseServerTransport`으로 통신을 할 인터페이스를 생성하고, `handle_sse` 메소드를 통해서 서버 동작을 처리함.
 그 이후 starlette를 통해 sse를 routing해서 http에 마운트하여 일반 사용자가 http를 통해 sse메소드를 받아볼 수 있도록 구현한다.
 이렇게 생성된 서버는 uvicorn을 통해 배포된다.
