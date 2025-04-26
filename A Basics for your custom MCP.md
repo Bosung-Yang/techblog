@@ -68,5 +68,148 @@ mimeType : string;
 LLM이 수행할 행동을 지시하는 부분으로 외부 시스템과 상호작용하고 계산을 수행할 수 있음.
 `tools/list`에서 실행 가능한 tool 목록을 가져와 `tools/call` 메소드를 통해 실행할 수 있음
 
+--- 
+이 포스트에서는 sse를 통해 통신하는 mcp 서버-클라이언트를 구현한다. stdio는 실제 서비스에서는 사용할 확률이 적고 대부분 테스트 단계에서 사용되기 때문임.
+# Implementation Example for Servers
+클라이언트는 서버로부터 데이터를 받아오기만 하기 때문에 자연스러운 흐름을 위해 서버측 구현부터 살펴본다.
+
+## import libraries
+```
+import uvicorn
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.routing import Route, Mount
+
+from mcp.server.fastmcp import FastMCP
+from mcp.shared.exceptions import McpError
+from mcp.types import ErrorData, INTERNAL_ERROR, INVALID_PARAMS
+from mcp.server.sse import SseServerTransport
+
+from fastmcp.prompts.base import UserMessage, AssistantMessage
+```
+주요 라이브러리는 다음과 같음
+- Uvicorn : 서버 앱을 호스팅하기 위하여
+- Starlette : SSE를 Handle하여 HTTP로 통신을 할 수 있도록 중간다리역활
+- MCP and FastMCP : mcp 서버 및 구성요소 구현을 위하여
 
 
+## 구성 요소 선언
+```
+mcp = FastMCP('Demo')
+# Add an addition tool
+@mcp.tool()
+def add(a: int, b: int) -> int:
+    """Add two numbers"""
+    return a + b
+
+@mcp.tool()
+def read_wikipedia_article(url: str) -> str:
+    """
+    Fetch a Wikipedia article at the provided URL, parse its main content,
+    convert it to Markdown, and return the resulting text.
+
+    Usage:
+        read_wikipedia_article("https://en.wikipedia.org/wiki/Python_(programming_language)")
+    """
+    try:
+        if not url.startswith("http"):
+            raise ValueError("URL must start with http or https.")
+
+        response = requests.get(url, timeout=10)
+        if response.status_code != 200:
+            raise McpError(
+                ErrorData(
+                    INTERNAL_ERROR,
+                    f"Failed to retrieve the article. HTTP status code: {response.status_code}"
+                )
+            )
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        content_div = soup.find("div", {"id": "mw-content-text"})
+        if not content_div:
+            raise McpError(
+                ErrorData(
+                    INVALID_PARAMS,
+                    "Could not find the main content on the provided Wikipedia URL."
+                )
+            )
+
+        markdown_text = str(content_div)
+        return markdown_text
+
+    except ValueError as e:
+        raise McpError(ErrorData(INVALID_PARAMS, str(e))) from e
+    except RequestException as e:
+        raise McpError(ErrorData(INTERNAL_ERROR, f"Request error: {str(e)}")) from e
+    except Exception as e:
+        raise McpError(ErrorData(INTERNAL_ERROR, f"Unexpected error: {str(e)}")) from e
+
+@mcp.prompt()
+def ask_review(code_snippet: str) -> str:
+    """Generates a standard code review request."""
+    return f"Please review the following code snippet for potential bugs and style issues:\n```python\n{code_snippet}\n```"
+
+@mcp.prompt()
+def debug_session_start(error_message: str) -> list[UserMessage]:
+    """Initiates a debugging help session."""
+    return [
+        UserMessage(f"I encountered an error:\n{error_message}"),
+        AssistantMessage("Okay, I can help with that. Can you provide the full traceback and tell me what you were trying to do?")
+    ]
+
+@mcp.resource("config://app-version")
+def get_app_version() -> str:
+    """Returns the application version."""
+    return "v2.1.0"
+
+@mcp.resource("db://users/{user_id}/email")
+async def get_user_email(user_id: str) -> str:
+    """Retrieves the email address for a given user ID."""
+    # Replace with actual database lookup
+    emails = {"123": "alice@example.com", "456": "bob@example.com"}
+    return emails.get(user_id, "not_found@example.com")
+
+@mcp.resource("data://product-categories")
+def get_categories() -> list[str]:
+    """Returns a list of available product categories."""
+    return ["Electronics", "Books", "Home Goods"]
+
+# Add a dynamic greeting resource
+@mcp.resource("greeting://{name}")
+def get_greeting(name: str) -> str:
+    """Get a personalized greeting"""
+    return f"Hello, {name}!"
+```
+먼저 FastMCP를 이용해서 서버를 init함.  
+그 이후 리소스, 프롬프트, 툴은 mcp 데코레이터를 통해 선언이 가능함.
+
+## Handleing SSE and Deploying Server app
+적어도 나에게는 sse를 이용한 통신이 생소했고, mcp 서버에서 데이터를 어떻게 제공해야하는지에 대한 정보를 찾는데 많은 시간을 보냈었음.
+한가지 쉽고 유용한 방법은 sse를 라우팅하여 http로 서버-클라이언트간 통신이 가능하게 하는 것임.
+```
+
+sse = SseServerTransport("/messages/")
+
+async def handle_sse(request: Request) -> None:
+    _server = mcp._mcp_server
+    async with sse.connect_sse(
+        request.scope,
+        request.receive,
+        request._send,
+    ) as (reader, writer):
+        await _server.run(reader, writer, _server.create_initialization_options())
+
+app = Starlette(
+    debug=True,
+    routes=[
+        Route("/sse", endpoint=handle_sse),
+        Mount("/messages/", app=sse.handle_post_message),
+    ],
+)
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="localhost", port=8001)
+```
+MCP에서 제공하는 `SseServerTransport`으로 통신을 할 인터페이스를 생성하고, `handle_sse` 메소드를 통해서 서버 동작을 처리함.
+그 이후 starlette를 통해 sse를 routing해서 http에 마운트하여 일반 사용자가 http를 통해 sse메소드를 받아볼 수 있도록 구현한다.
+이렇게 생성된 서버는 uvicorn을 통해 배포된다.
