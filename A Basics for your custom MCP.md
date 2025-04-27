@@ -210,6 +210,9 @@ app = Starlette(
 if __name__ == "__main__":
     uvicorn.run(app, host="localhost", port=8001)
 ```
+MCP에서 제공하는 `SseServerTransport`으로 통신을 할 인터페이스를 생성하고, `handle_sse` 메소드를 통해서 서버 동작을 처리함.
+그 이후 starlette를 통해 sse를 routing해서 http에 마운트하여 일반 사용자가 http를 통해 sse메소드를 받아볼 수 있도록 구현한다.
+이렇게 생성된 서버는 uvicorn을 통해 배포된다.
 
 # Implementation examples for MCP Client
 ## import libaries
@@ -223,7 +226,61 @@ from mcp import ClientSession
 from mcp.client.sse import sse_client
 ```
 
-## TBU
-MCP에서 제공하는 `SseServerTransport`으로 통신을 할 인터페이스를 생성하고, `handle_sse` 메소드를 통해서 서버 동작을 처리함.
-그 이후 starlette를 통해 sse를 routing해서 http에 마운트하여 일반 사용자가 http를 통해 sse메소드를 받아볼 수 있도록 구현한다.
-이렇게 생성된 서버는 uvicorn을 통해 배포된다.
+## MCP 클라이언트 
+```
+def print_items(name: str, result: any) -> None:print(f"\nAvailable {name}:")
+    items = getattr(result, name)
+    if items:
+        for item in items:
+            print(" *", item)
+    else:
+        print("No items available")
+
+
+async def main(server_url: str, article_url: str = None):
+    """Connect to the MCP server, list its capabilities, and optionally call a tool.
+
+    Args:
+        server_url: Full URL to SSE endpoint (e.g. http://localhost:8000/sse)
+        article_url: (Optional) Wikipedia URL to fetch an article
+    """
+    if urlparse(server_url).scheme not in ("http", "https"):
+        print("Error: Server URL must start with http:// or https://")
+        sys.exit(1)
+
+    try:
+        async with sse_client(server_url) as streams:
+            async with ClientSession(streams[0], streams[1]) as session:
+                await session.initialize()
+                print("Connected to MCP server at", server_url)
+                print_items("tools", await session.list_tools())
+                print_items("resources", await session.list_resources())
+                #print(session.list_resource_templates)
+                print_items("resourceTemplates", await session.list_resource_templates())
+                print_items("prompts", await session.list_prompts())
+
+                """
+                if article_url:
+                    print("\nCalling read_wikipedia_article tool...")
+                    try:
+                        # Use the documented call_tool method to invoke the tool
+                        response = await session.call_tool(
+                            "read_wikipedia_article", arguments={"url": article_url}
+                        )
+                        print("\n=== Wikipedia Article Markdown Content ===\n")
+                        print(response)
+                    except Exception as tool_exc:
+                        print("Error calling read_wikipedia_article tool:")
+                        traceback.print_exception(
+                            type(tool_exc), tool_exc, tool_exc.__traceback__
+                        )
+                """
+    except Exception as e:
+        print(f"Error connecting to server: {e}")
+        traceback.print_exception(type(e), e, e.__traceback__)
+        sys.exit(1)
+```
+클라이언트는 `sse_client`를 이용하여 stream을 생성하고 `ClientSession`을 생성한다.  
+그 다음 사용가능한 리소스, 툴, 프롬프트 목록은 각각 `list_tools, list_resources, list_prompts`로 확인 할 수 있다.
+
+
