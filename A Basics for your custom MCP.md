@@ -73,6 +73,14 @@ LLM이 수행할 행동을 지시하는 부분으로 외부 시스템과 상호�
 # Implementation Example for Servers
 클라이언트는 서버로부터 데이터를 받아오기만 하기 때문에 자연스러운 흐름을 위해 서버측 구현부터 살펴본다.
 
+## Install MCP python sdk
+```
+uv add mcp[cli]
+```
+or
+```
+pip install mcp[cli]
+```
 ## import libraries
 ```
 import uvicorn
@@ -228,6 +236,10 @@ from mcp.client.sse import sse_client
 
 ## MCP 클라이언트 
 ```
+from langchain_openai import ChatOpenAI
+import os
+os.environ['OPENAI_API_KEY'] = 'Your OpenAI Key'
+
 def print_items(name: str, result: any) -> None:print(f"\nAvailable {name}:")
     items = getattr(result, name)
     if items:
@@ -237,13 +249,8 @@ def print_items(name: str, result: any) -> None:print(f"\nAvailable {name}:")
         print("No items available")
 
 
-async def main(server_url: str, article_url: str = None):
-    """Connect to the MCP server, list its capabilities, and optionally call a tool.
+async def mcp_get(server_url: str):
 
-    Args:
-        server_url: Full URL to SSE endpoint (e.g. http://localhost:8000/sse)
-        article_url: (Optional) Wikipedia URL to fetch an article
-    """
     if urlparse(server_url).scheme not in ("http", "https"):
         print("Error: Server URL must start with http:// or https://")
         sys.exit(1)
@@ -258,23 +265,6 @@ async def main(server_url: str, article_url: str = None):
                 #print(session.list_resource_templates)
                 print_items("resourceTemplates", await session.list_resource_templates())
                 print_items("prompts", await session.list_prompts())
-
-                """
-                if article_url:
-                    print("\nCalling read_wikipedia_article tool...")
-                    try:
-                        # Use the documented call_tool method to invoke the tool
-                        response = await session.call_tool(
-                            "read_wikipedia_article", arguments={"url": article_url}
-                        )
-                        print("\n=== Wikipedia Article Markdown Content ===\n")
-                        print(response)
-                    except Exception as tool_exc:
-                        print("Error calling read_wikipedia_article tool:")
-                        traceback.print_exception(
-                            type(tool_exc), tool_exc, tool_exc.__traceback__
-                        )
-                """
     except Exception as e:
         print(f"Error connecting to server: {e}")
         traceback.print_exception(type(e), e, e.__traceback__)
@@ -282,5 +272,61 @@ async def main(server_url: str, article_url: str = None):
 ```
 클라이언트는 `sse_client`를 이용하여 stream을 생성하고 `ClientSession`을 생성한다.  
 그 다음 사용가능한 리소스, 툴, 프롬프트 목록은 각각 `list_tools, list_resources, list_prompts`로 확인 할 수 있다.
+Note that, 사용자마다 다른 정보를 제공하고 싶은 데이터의 경우 dynamic_resources라고 하는데, 접근하려면 `list_resource_templetes`로 접근해야함을 유의해야한다.
 
+## Client App Example
+그 다음엔 mcp로부터 데이터를 가져와서 실질적으로 활용하는 부분에 대한 소스코드다.
+```
+async def main(server_url: str, article_url: str = None):
+    
+    model = ChatOpenAI(
+            model="gpt-4o",
+            max_tokens=2048,
+            temperature=0.1,
+        )
+    try:
+        async with sse_client(server_url) as streams:
+            async with ClientSession(streams[0], streams[1]) as session:
+                await session.initialize()
 
+                if article_url:
+                    print("\nCalling read_wikipedia_article tool...")
+                    try:
+                        # Use the documented call_tool method to invoke the tool
+                        response = await session.call_tool(
+                            "read_wikipedia_article", arguments={"url": article_url}
+                        )
+                        
+                        #print(response)
+                    except Exception as tool_exc:
+                        print("Error calling read_wikipedia_article tool:")
+                        traceback.print_exception(
+                            type(tool_exc), tool_exc, tool_exc.__traceback__
+                        )
+                try:
+                    prompt = await session.get_prompt('summary_wiki', {"content": str(response)})
+                except Exception as e:
+                    print("Error getting prompt:", e)
+                    return
+                #print('Prompt:', prompt)
+                print(model.invoke(str(prompt)))
+    except Exception as e:
+        print(e)
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print(
+            "Usage: uv run -- client.py <server_url> [<wikipedia_article_url>]\n"
+            "Example: uv run -- client.py http://localhost:8000/sse https://en.wikipedia.org/wiki/Python_(programming_language)"
+        )
+        sys.exit(1)
+
+    server_url = sys.argv[1]
+    article_url = sys.argv[2] if len(sys.argv) > 2 else None
+    asyncio.run(mcp_get(server_url))
+    asyncio.run(main(server_url, article_url))
+```
+MCP 서버에서 제공하는 프롬프트와 tool을 이용해서 LLM을 사용하는 예시 코드이다. 
+`call_tool`을 통해 위키피디아 정보를 크롤링하는 툴을 실행시키고, `get_prompt`에 크롤링한 정보를 전달하여 프롬프트를 완성한 다음 LLM모델의 응답을 출력한다.
+
+이 포스트에서는 custom mcp를 구현하기 위한 기본적인 구성과 예제를 다루었다. 해당 예시가 독자들이 mcp를 이해하고 구현하는데에 도움이 되었으면 좋겠다.
